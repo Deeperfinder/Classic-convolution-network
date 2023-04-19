@@ -55,7 +55,7 @@ class MobileNetV1(nn.Module):
 
 
 
-# testnet = MobileNetV1(10).to(device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-# torchsummary.summary(testnet, (3,224,224))
+testnet = MobileNetV1(10).to(device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+torchsummary.summary(testnet, (3,224,224))
 
 

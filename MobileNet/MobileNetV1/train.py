@@ -59,22 +59,22 @@ device = torch.device('cuda' if torch.cuda.is_available() else'cpu')
 
 
 
-def evalutate(model, gpu, test_loader, rank):
+def evalutate(model, gpu, test_loader, rank, epoch):
+    if rank == 1:
+        return
+    test_bar = tqdm(test_loader)
+    val_accus = []
     model.eval()
-    size = torch.tensor(0.).to(device)
-    correct = torch.tensor(0.).to(device)
+    size = torch.tensor(0.).to(gpu)
     with torch.no_grad():
-        for i, (images, labels) in enumerate(tqdm(test_loader)):
-            images = images.to(device)
-            labels = labels.to(device)
+        for i, (images, labels) in enumerate(test_bar):
+            images = images.to(gpu)
+            labels = labels.to(gpu)
             outputs = model(images)
             size += images.shape[0]
-            correct += (outputs.argmax(1)==labels).type(torch.float).sum()
-
-    dist.reduce(size, 0, op = dist.ReduceOP.SUM)
-    dist.reduce(correct, 0, op = dist.ReduceOP.SUM)
-    if rank ==0:
-        print('Evaluate accuracy is {:.2f}'.format(correct/size))
+            acc = (outputs.argmax(dim=-1) == labels.to(gpu)).float().mean()
+            val_accus.append(acc)
+            test_bar.desc = "Val epoch [{} / {}], Acc:{:.3f}".format(epoch + 1, 50,100. * sum(val_accus) /size)
 
 def train(gpu, args):
     # 训练函数中仅需要更改初始化方式即可。在ENV中只需要指定init_method='env://'。
@@ -85,14 +85,14 @@ def train(gpu, args):
     model = MobileNetV1(num_classes=10)
     model.cuda(gpu)
     criterion = nn.CrossEntropyLoss().to(gpu)
-    optimizer = torch.optim.SGD(model.parameters(), 1e-4)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=5e-4)
 
     # 并行环境下，对于用到BN层的模型需要转换为同步BN层；
     # 用Distributed Dataparallel将模型封装为一个DDP模型，并复制到指定的GPU上
     # 封装时不需要改变模型内部的代码；设置混合精度中scaler，通过设置enabled参数控制是否生效
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     model = nn.parallel.DistributedDataParallel(model, device_ids = [gpu])
-    scaler = GradScaler(enabled=args.use_mix_precision)
+    #scaler = GradScaler(enabled=args.use_mix_precision)
 
     # Data loading
     # 训练集
@@ -117,9 +117,8 @@ def train(gpu, args):
     # 测试集
     test_set = torchvision.datasets.CIFAR10(
         root='../../Alexnet', train=False, download=False, transform=transform_test)
-    test_sample = torch.utils.data.distributed.DistributedSampler(test_set)
     test_loader = torch.utils.data.DataLoader(
-        test_set, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True,sampler=test_sample)  # num_workers=0)
+        test_set, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)  # num_workers=0)
 
     total_step = len(train_loader)      #这里的意思是按batch_size的大小，总共有多少份
 
@@ -127,40 +126,40 @@ def train(gpu, args):
         # 在每个epoch开始前打乱数据顺序
         train_loader.sampler.set_epoch(epoch)
         model.train()
-        for i,(images,labels) in enumerate(tqdm(train_loader)):
+        if args.rank ==0:
+            train_bar = tqdm(train_loader)
+        else:
+            train_bar = train_loader
+        train_accs = []
+        for i,(images,labels) in enumerate(train_bar):
             images= images.to(gpu)
             labels = labels.to(gpu)
-            # 半精度训练
-            with torch.cuda.amp.autocast(enabled=args.use_mix_precision):
-                outputs = model(images)
-                loss = criterion(outputs, labels)
-
+            outputs = model(images)
+            loss = criterion(outputs, labels)
             # backward and optimize
             optimizer.zero_grad()
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-
+            loss.backward()
+            optimizer.step()
+            acc = (outputs.argmax(dim=-1) == labels.to(gpu)).float().mean()
+            train_accs.append(acc)
             # 避免LOG信息重复打印，只允许rank0进程打印
-            if(i+1)%100==0 and args.rank==0:
-                print('Epoch[{}/{}], Step [{}/{}], Loss: {:.4f}'.format(epoch + 1, args.epochs, i + 1, total_step,
-                                                                   loss.item()))
-            dist.destroy_process_group()
+            if args.rank==0:
+                train_bar.desc = "Train epoch [{} / {}], Step[{}/{}],  loss:{:.3f} | acc:{:.3f}".format(
+                    epoch + 1, 50, i+1, total_step,loss.item(),100. * sum(train_accs) / len(train_accs))
+        evalutate(model, gpu, test_loader, args.rank, epoch)
+    dist.destroy_process_group()
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('-n', '--nodes', default=1,
                         type=int, metavar='N')
-
-
     parser.add_argument('-g', '--gpuid', default=0, type=int, help = "which gpu to use")
     parser.add_argument('-e', '--epochs', default=50, type=int,
                         metavar='N',
                         help='number of total epochs to run')
-    parser.add_argument('-b', '--batch_size', default=64, type=int,
+    parser.add_argument('-b', '--batch_size', default=96, type=int,
                         metavar='N',
                         help='number of batchsize')
-
     ##################################################################################
     # 这里指的是当前进程在当前机器中的序号，注意和在全部进程中序号的区别，即指的是GPU序号0,1,2,3。
     # 在ENV模式中，这个参数是必须的，由启动脚本自动划分，不需要手动指定。要善用local_rank来分配GPU_ID。
@@ -181,14 +180,7 @@ def parse_args():
     parser.add_argument("--master_addr", type=str, default="172.26.10.162",
                         help='ip address of machine 0')
     args = parser.parse_args()
-    #################################
-    # train(args.local_rank, args)：一般情况下保持local_rank与进程所用GPU_ID一致。
-    print("----------")
-    print(args.local_rank)
-    print(args.batch_size)
-    print("------------")
     return args
-
 
 if __name__ == '__main__':
     import os
@@ -198,11 +190,9 @@ if __name__ == '__main__':
     #         for epoch in range(max_epoch):
     #             each_dist_tran_data_num = ((len(train_set)%dist.get_world_size()) + len(train_set)) /dist.get_world_size()
     #             train_sample.set_epoch(epoch)
-    #
-    #
     #             train_bar = tqdm(train_loader)
     #             optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=5e-4)
-    #             # ExpLR = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.98)
+    #             #ExpLR = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.98)
     #             CosLR = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=0)
     #             model.train()
     #             train_loss = []
