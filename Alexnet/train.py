@@ -4,8 +4,9 @@ import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
-max_epoch  = 20
+max_epoch  = 50
 batch_size = 64
 best_acc = 0.85
 
@@ -41,19 +42,18 @@ if __name__ == '__main__':
     with open('text/acc.txt', 'w') as f:
         with open('text/log.txt', 'w') as f2:
             for epoch in range(0, max_epoch):
+                train_bar = tqdm(train_loader)
                 optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=5e-4)
                 # ExpLR = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.98)
                 CosLR = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=0)
                 model.train()
                 train_loss = []
                 train_accs = []
-                for i, data in enumerate(train_loader, 0):
+                for i, data in enumerate(train_bar):
                     inputs, labels = data
                     inputs, labels = inputs.to(device), labels.to(device)
-
                     outputs = model(inputs)
                     loss = criterion(outputs, labels)
-
                     optimizer.zero_grad()  # 每个batch的梯度需要清零
                     loss.backward()
                     optimizer.step()
