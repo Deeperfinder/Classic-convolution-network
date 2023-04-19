@@ -1,6 +1,6 @@
 # MobilenetV1 代码
 ## MobilenetV1 参数
-Input size = (3,224,224)
+Input size = (3,224,224)  
 ![](images/Mobilenetv1.png)
 ## Run command
 ```python -m torch.distributed.launch --nproc_per_node=2 train.py ```
