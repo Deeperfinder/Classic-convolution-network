@@ -32,6 +32,6 @@ class Alexnet(nn.Module):
         out = self.net(x)
         return out
 
-# print(Alexnet())
-# testnet = Alexnet().to(device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-# torchsummary.summary(testnet, (3,224,224))
+print(Alexnet())
+testnet = Alexnet().to(device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+torchsummary.summary(testnet, (3,224,224))
